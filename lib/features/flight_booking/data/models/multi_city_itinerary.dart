@@ -1,6 +1,5 @@
 import 'package:equatable/equatable.dart';
-
-enum ProviderType { SABRE, AMADEUS, KIWI, LOCAL_AGENCY } // Aligne les enums avec ton backend Java
+import '../../../../core/models/provider_quote.dart';
 
 class MultiCityItinerary {
   final ProviderType providerType;
@@ -15,28 +14,11 @@ class MultiCityItinerary {
 
   factory MultiCityItinerary.fromJson(Map<String, dynamic> json) {
     return MultiCityItinerary(
-      providerType: ProviderType.values.firstWhere(
-            (e) => e.name == json['providerType'],
-        orElse: () => ProviderType.LOCAL_AGENCY, // Valeur de repli sécurisée
-      ),
+      providerType: ProviderType.fromString(json['providerType'] as String? ?? ''),
       totalPrice: Money.fromJson(json['totalPrice']),
       legs: (json['legs'] as List)
           .map((legJson) => MultiCityItineraryLeg.fromJson(legJson))
           .toList(),
-    );
-  }
-}
-
-class Money {
-  final double amount;
-  final String currency;
-
-  Money({required this.amount, required this.currency});
-
-  factory Money.fromJson(Map<String, dynamic> json) {
-    return Money(
-      amount: (json['amount'] as num).toDouble(),
-      currency: json['currency'] ?? 'XAF',
     );
   }
 }

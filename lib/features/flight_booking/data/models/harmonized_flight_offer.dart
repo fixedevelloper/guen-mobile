@@ -1,72 +1,14 @@
 import 'package:equatable/equatable.dart';
+import '../../../../core/models/provider_quote.dart';
+import 'flight_offer_detail.dart';
 
-/// Reflète l'énumération ProviderType du backend Spring Boot
-enum ProviderType {
-  SABRE,
-  AMADEUS,
-  TRAVELPORT,
-  LOCAL_CHARTER,
-  UNKNOWN;
-
-  static ProviderType fromString(String value) {
-    return ProviderType.values.firstWhere(
-          (e) => e.name == value.toUpperCase(),
-      orElse: () => ProviderType.UNKNOWN,
-    );
-  }
-}
-
-/// Reflète la classe partagée com.guentours.shared.Money
-class Money extends Equatable {
-  final double amount;
-  final String currency;
-
-  const Money({
-    required this.amount,
-    required this.currency,
-  });
-
-  factory Money.fromJson(Map<String, dynamic> json) {
-    return Money(
-      amount: (json['amount'] as num?)?.toDouble() ?? 0.0,
-      currency: json['currency'] as String? ?? 'XAF',
-    );
-  }
-
-  @override
-  String toString() => '${amount.toStringAsFixed(0)} $currency';
-
-  @override
-  List<Object?> get props => [amount, currency];
-}
-
-/// Reflète le Record com.guentours.search.ProviderQuote
-class ProviderQuote extends Equatable {
-  final String offerId;
-  final ProviderType providerType;
-  final Money price;
-
-  const ProviderQuote({
-    required this.offerId,
-    required this.providerType,
-    required this.price,
-  });
-
-  factory ProviderQuote.fromJson(Map<String, dynamic> json) {
-    return ProviderQuote(
-      offerId: json['offerId'] as String? ?? '',
-      providerType: ProviderType.fromString(json['providerType'] as String? ?? ''),
-      price: Money.fromJson(json['price'] as Map<String, dynamic>? ?? const {}),
-    );
-  }
-
-  @override
-  List<Object?> get props => [offerId, providerType, price];
-}
+export '../../../../core/models/provider_quote.dart' show ProviderType, Money, ProviderQuote;
+export 'flight_offer_detail.dart';
 
 /// Modèle principal HarmonizedFlightOffer
 class HarmonizedFlightOffer extends Equatable {
   final String airline;
+  final String? airlineName;
   final String flightNumber;
   final String origin;
   final String destination;
@@ -75,10 +17,26 @@ class HarmonizedFlightOffer extends Equatable {
   final String cabinClass;
   final int seatsAvailable;
   final String bestOfferId;
-  final List<ProviderQuote> quotes;
+  final List<FlightProviderQuote> quotes;
+
+  /// Nom d'affichage de la compagnie : `airlineName` si le fournisseur l'a
+  /// fourni, sinon le code IATA brut (même repli que `airlineLabel(offer.airline)`
+  /// côté Next.js pour un code non résolu).
+  String get displayAirlineName => (airlineName != null && airlineName!.isNotEmpty) ? airlineName! : airline;
+
+  /// La quote correspondant à [bestOfferId] (résolu côté serveur) ; retombe
+  /// sur la moins chère si elle n'est pas retrouvée parmi [quotes].
+  FlightProviderQuote? get bestQuote {
+    if (quotes.isEmpty) return null;
+    return quotes.firstWhere(
+          (q) => q.offerId == bestOfferId,
+      orElse: () => sortedByPrice(quotes).first as FlightProviderQuote,
+    );
+  }
 
   const HarmonizedFlightOffer({
     required this.airline,
+    this.airlineName,
     required this.flightNumber,
     required this.origin,
     required this.destination,
@@ -93,6 +51,7 @@ class HarmonizedFlightOffer extends Equatable {
   factory HarmonizedFlightOffer.fromJson(Map<String, dynamic> json) {
     return HarmonizedFlightOffer(
       airline: json['airline'] as String? ?? '',
+      airlineName: json['airlineName'] as String?,
       flightNumber: json['flightNumber'] as String? ?? '',
       origin: json['origin'] as String? ?? '',
       destination: json['destination'] as String? ?? '',
@@ -102,7 +61,7 @@ class HarmonizedFlightOffer extends Equatable {
       seatsAvailable: json['seatsAvailable'] as int? ?? 0,
       bestOfferId: json['bestOfferId'] as String? ?? '',
       quotes: (json['quotes'] as List<dynamic>?)
-          ?.map((e) => ProviderQuote.fromJson(e as Map<String, dynamic>))
+          ?.map((e) => FlightProviderQuote.fromJson(e as Map<String, dynamic>))
           .toList() ?? const [],
     );
   }
@@ -110,6 +69,7 @@ class HarmonizedFlightOffer extends Equatable {
   @override
   List<Object?> get props => [
     airline,
+    airlineName,
     flightNumber,
     origin,
     destination,

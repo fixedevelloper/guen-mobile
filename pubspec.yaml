@@ -1,5 +1,5 @@
 name: guentravel
-description: "A new Flutter project."
+description: "Votre passerelle de confiance pour comparer les vols pas chers et réserver les meilleurs hébergements à travers l'Afrique et le monde entier."
 publish_to: 'none'
 
 version: 1.0.0+1
@@ -10,6 +10,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
 
   cupertino_icons: ^1.0.8
 
@@ -17,14 +19,39 @@ dependencies:
   flutter_bloc: ^8.1.3
   dio: ^5.4.0
   get_it: ^7.6.0
-  intl: ^0.20.3
+  intl: ^0.20.2
   equatable: ^2.1.0
+
+  # Session JWT via cookie HttpOnly (même mécanisme que le frontend Next.js) :
+  # persiste les cookies posés par AuthController entre les lancements de l'app.
+  cookie_jar: ^4.0.8
+  dio_cookie_manager: ^3.1.1
+  path_provider: ^2.1.4
+
+  # Ouvre la redirection 3DS/AVS d'un paiement carte (PaymentAuthorizationType.REDIRECT).
+  url_launcher: ^6.3.1
+
+  # Persiste la langue choisie (FR/EN) entre deux lancements de l'app.
+  shared_preferences: ^2.3.2
+
+  # Connexion Google/Facebook native (Android/iOS/Web uniquement - pas de support Linux desktop) :
+  # le token obtenu ici est vérifié côté backend par SocialTokenVerifier, voir AuthController.
+  google_sign_in: ^6.2.1
+  flutter_facebook_auth: ^7.1.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
 
 flutter:
+  generate: true
   uses-material-design: true
+  assets:
+    - assets/images/
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/app_icon.png" # Chemin de votre image HD (min. 1024x1024)

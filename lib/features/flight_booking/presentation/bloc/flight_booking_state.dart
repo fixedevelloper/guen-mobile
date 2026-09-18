@@ -1,7 +1,9 @@
 import 'package:equatable/equatable.dart';
+import '../../data/models/ancillary_option.dart';
 import '../../data/models/harmonized_flight_offer.dart';
 import '../../data/models/multi_city_itinerary.dart';
-import '../../data/models/seat_map_response.dart';
+import '../../../../core/models/booking_response.dart';
+import '../../../../core/models/payment_result.dart';
 
 enum FlightBookingStatus {
   initial,
@@ -19,7 +21,13 @@ enum PaymentStatus {
   initial,
   processing,
   success,
-  failed
+  failed,
+  /// Mobile Money : en attente de confirmation USSD côté client (webhook
+  /// gateway asynchrone). L'écran doit poller PaymentStatusRefreshRequested.
+  pending,
+  /// Carte : la gateway exige une étape synchrone (PIN/AVS/OTP/redirection)
+  /// avant de pouvoir finaliser. Voir paymentResult.authorizationType.
+  pendingAuthorization,
 }
 
 class FlightBookingState extends Equatable {
@@ -38,17 +46,57 @@ class FlightBookingState extends Equatable {
   final DateTime? departureDate;
   final List<String> passengerTypes; // ex: ['ADULT', 'CHILD']
 
-  // Gestion des sièges
-  final SeatMapResponse? seatMap;
-  final List<String> selectedSeats;
+  // Options additionnelles (sièges tarifés/bagages/repas/assurance)
+  final List<AncillaryOption>? ancillaryOptions;
+  final List<String> selectedAncillaryIds;
 
   // Données du tunnel d'achat et API
-  final Map<String, dynamic>? passengerData;
-  final String? bookingId;
+  final BookingResponse? confirmedBooking; // réponse du checkout (POST /bookings/checkout[/multi-city])
+  final PaymentResult? paymentResult; // réponse du paiement (POST /payments)
   final String? errorMessage;
+
+  String? get bookingId => confirmedBooking?.id;
 
   // Getter pratique pour l'UI (utilisé dans le bouton de paiement)
   bool get isSubmitting => paymentStatus == PaymentStatus.processing;
+
+  /// Ids AncillaryOption sélectionnés qui reviennent au voyageur `index` (base 0) :
+  /// ceux dont le paxRef vaut "T${index+1}", plus - pour le voyageur 0
+  /// uniquement - ceux sans paxRef (extras au niveau réservation, ex:
+  /// assurance). Même répartition que applySelectedExtras côté Next.js
+  /// (checkout/page.tsx).
+  List<String> ancillaryIdsForTraveler(int index) {
+    final options = ancillaryOptions;
+    if (options == null || selectedAncillaryIds.isEmpty) return const [];
+    final byId = {for (final o in options) o.id: o};
+    final expectedPaxRef = 'T${index + 1}';
+    return selectedAncillaryIds.where((id) {
+      final option = byId[id];
+      if (option == null) return false;
+      return option.paxRef == expectedPaxRef || (option.paxRef == null && index == 0);
+    }).toList();
+  }
+
+  /// Code de siège ("1A") choisi par chaque voyageur, dans l'ordre de
+  /// `passengerTypes` - pour l'affichage uniquement, dérivé de l'extra SEAT
+  /// sélectionné avec le paxRef correspondant.
+  List<String> get selectedSeatCodesByTraveler {
+    final options = ancillaryOptions;
+    if (options == null || selectedAncillaryIds.isEmpty) return const [];
+    final byId = {for (final o in options) o.id: o};
+    final codes = <String>[];
+    for (var i = 0; i < passengerTypes.length; i++) {
+      final expectedPaxRef = 'T${i + 1}';
+      for (final id in selectedAncillaryIds) {
+        final option = byId[id];
+        if (option != null && option.type == AncillaryType.SEAT && option.paxRef == expectedPaxRef) {
+          codes.add(option.code ?? option.label);
+          break;
+        }
+      }
+    }
+    return codes;
+  }
 
   const FlightBookingState({
     this.status = FlightBookingStatus.initial,
@@ -57,10 +105,10 @@ class FlightBookingState extends Equatable {
     this.selectedFlight,
     this.multiCityFlights = const [],
     this.selectedMultiCityItinerary,
-    this.seatMap,
-    this.selectedSeats = const [],
-    this.passengerData,
-    this.bookingId,
+    this.ancillaryOptions,
+    this.selectedAncillaryIds = const [],
+    this.confirmedBooking,
+    this.paymentResult,
     this.errorMessage,
     this.departure,
     this.destination,
@@ -75,10 +123,10 @@ class FlightBookingState extends Equatable {
     HarmonizedFlightOffer? selectedFlight,
     List<MultiCityItinerary>? multiCityFlights,
     MultiCityItinerary? selectedMultiCityItinerary,
-    SeatMapResponse? seatMap,
-    List<String>? selectedSeats,
-    Map<String, dynamic>? passengerData,
-    String? bookingId,
+    List<AncillaryOption>? ancillaryOptions,
+    List<String>? selectedAncillaryIds,
+    BookingResponse? confirmedBooking,
+    PaymentResult? paymentResult,
     String? errorMessage,
     String? departure,
     String? destination,
@@ -92,11 +140,11 @@ class FlightBookingState extends Equatable {
       selectedFlight: selectedFlight ?? this.selectedFlight,
       multiCityFlights: multiCityFlights ?? this.multiCityFlights,
       selectedMultiCityItinerary: selectedMultiCityItinerary ?? this.selectedMultiCityItinerary,
-      seatMap: seatMap ?? this.seatMap,
-      selectedSeats: selectedSeats ?? this.selectedSeats,
-      passengerData: passengerData ?? this.passengerData,
-      bookingId: bookingId ?? this.bookingId,
-      errorMessage: errorMessage ?? this.errorMessage,
+      ancillaryOptions: ancillaryOptions ?? this.ancillaryOptions,
+      selectedAncillaryIds: selectedAncillaryIds ?? this.selectedAncillaryIds,
+      confirmedBooking: confirmedBooking ?? this.confirmedBooking,
+      paymentResult: paymentResult ?? this.paymentResult,
+      errorMessage: errorMessage,
       departure: departure ?? this.departure,
       destination: destination ?? this.destination,
       departureDate: departureDate ?? this.departureDate,
@@ -112,10 +160,10 @@ class FlightBookingState extends Equatable {
     selectedFlight,
     multiCityFlights,
     selectedMultiCityItinerary,
-    seatMap,
-    selectedSeats,
-    passengerData,
-    bookingId,
+    ancillaryOptions,
+    selectedAncillaryIds,
+    confirmedBooking,
+    paymentResult,
     errorMessage,
     departure,
     destination,

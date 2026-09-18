@@ -1,7 +1,7 @@
 import 'package:equatable/equatable.dart';
 import '../../data/models/harmonized_flight_offer.dart';
 import '../../data/models/multi_city_itinerary.dart';
-import '../../data/models/payment_request.dart';
+import '../../../../core/models/payment_request.dart';
 
 abstract class FlightBookingEvent extends Equatable {
   const FlightBookingEvent();
@@ -54,13 +54,14 @@ class SearchFlightsRequested extends FlightBookingEvent {
   ];
 }
 
-/// DÉCLENCHÉ pour valider les sièges (reçoit une liste)
-class SeatsConfirmed extends FlightBookingEvent {
-  final List<String> seats;
-  const SeatsConfirmed(this.seats);
+/// DÉCLENCHÉ pour valider les extras choisis (sièges/bagages/repas/assurance) -
+/// reçoit les ids AncillaryOption (AncillaryOptionResponse.id côté Java) sélectionnés.
+class AncillaryOptionsConfirmed extends FlightBookingEvent {
+  final List<String> selectedIds;
+  const AncillaryOptionsConfirmed(this.selectedIds);
 
   @override
-  List<Object?> get props => [seats];
+  List<Object?> get props => [selectedIds];
 }
 
 /// DÉCLENCHÉ pour valider les infos passagers (reçoit une LISTE de voyageurs)
@@ -70,30 +71,51 @@ class TravelerInfo extends Equatable {
   final DateTime dateOfBirth; // On utilise DateTime côté Dart
   final String? passportNumber;
   final String type; // Doit correspondre à l'Enum PassengerType (ex: 'ADULT')
-  final String? seatNumber;
+  final String? nationality; // ISO 3166-1 alpha-2, requis par certains providers (ex: Travelopro)
+  final String? passportIssueCountry; // ISO 3166-1 alpha-2, optionnel
+  final DateTime? passportExpiryDate; // optionnel
+
+  /// Ids AncillaryOptionResponse (bagages/repas/siège/assurance) choisis par CE
+  /// voyageur à l'étape "options additionnelles" - remplace l'ancien champ
+  /// seatNumber positionnel : le prix et, le cas échéant, le jeton fournisseur
+  /// sont résolus côté serveur depuis ce même cache d'ids.
+  final List<String>? selectedAncillaryIds;
 
   const TravelerInfo({
     required this.fullName,
     required this.dateOfBirth,
     this.passportNumber,
     required this.type,
-    this.seatNumber,
+    this.nationality,
+    this.passportIssueCountry,
+    this.passportExpiryDate,
+    this.selectedAncillaryIds,
   });
+
+  static String _formatDate(DateTime date) =>
+      "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
 
   // Cette méthode simplifie le travail du BLoC et formate la date pour Spring Boot
   Map<String, dynamic> toJson() {
     return {
       'fullName': fullName,
       // Formatage strict en YYYY-MM-DD attendu par LocalDate en Java
-      'dateOfBirth': "${dateOfBirth.year}-${dateOfBirth.month.toString().padLeft(2, '0')}-${dateOfBirth.day.toString().padLeft(2, '0')}",
+      'dateOfBirth': _formatDate(dateOfBirth),
       'passportNumber': passportNumber,
       'type': type,
-      'seatNumber': seatNumber,
+      'nationality': nationality,
+      'passportIssueCountry': passportIssueCountry,
+      if (passportExpiryDate != null) 'passportExpiryDate': _formatDate(passportExpiryDate!),
+      if (selectedAncillaryIds != null && selectedAncillaryIds!.isNotEmpty)
+        'selectedAncillaryIds': selectedAncillaryIds,
     };
   }
 
   @override
-  List<Object?> get props => [fullName, dateOfBirth, passportNumber, type, seatNumber];
+  List<Object?> get props => [
+    fullName, dateOfBirth, passportNumber, type,
+    nationality, passportIssueCountry, passportExpiryDate, selectedAncillaryIds,
+  ];
 }
 
 // --- L'événement mis à jour ---
@@ -143,26 +165,39 @@ class FlightSelected extends FlightBookingEvent {
   List<Object?> get props => [flight, multiCityItinerary];
 }
 
-class LoadSeatMap extends FlightBookingEvent {
+/// Charge les extras tarifés (sièges/bagages/repas/assurance) disponibles pour
+/// l'offre sélectionnée - remplace l'ancien LoadSeatMap (plan de cabine simulé,
+/// non tarifé ; voir POST /api/bookings/ancillary-options côté Java).
+class LoadAncillaryOptions extends FlightBookingEvent {
   final String offerId;
-  const LoadSeatMap(this.offerId);
+  final String offerType;
+  const LoadAncillaryOptions(this.offerId, this.offerType);
 
   @override
-  List<Object?> get props => [offerId];
-}
-
-// Mise à jour ici : Correspondance avec l'UI et le BLoC
-class ProcessPaymentEvent extends FlightBookingEvent {
-  final Map<String, dynamic> paymentDetails;
-
-  const ProcessPaymentEvent({required this.paymentDetails});
-
-  @override
-  List<Object?> get props => [paymentDetails];
+  List<Object?> get props => [offerId, offerType];
 }
 
 class ResetBookingTunnel extends FlightBookingEvent {}
 class PaymentSubmitted extends FlightBookingEvent {
   final PaymentRequest request;
   const PaymentSubmitted(this.request);
+
+  @override
+  List<Object?> get props => [request];
+}
+
+/// Relit l'état d'un paiement Mobile Money en attente (polling déclenché par
+/// l'écran d'attente USSD).
+class PaymentStatusRefreshRequested extends FlightBookingEvent {
+  const PaymentStatusRefreshRequested();
+}
+
+/// Soumet le code (PIN/AVS/OTP) demandé pour débloquer un paiement carte
+/// resté en PENDING_AUTHORIZATION.
+class CardAuthorizationSubmitted extends FlightBookingEvent {
+  final String code;
+  const CardAuthorizationSubmitted(this.code);
+
+  @override
+  List<Object?> get props => [code];
 }

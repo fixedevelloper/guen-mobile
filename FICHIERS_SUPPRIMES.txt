@@ -1,0 +1,18 @@
+Ce zip contient uniquement les fichiers AJOUTÉS ou MODIFIÉS.
+
+Les fichiers suivants ont aussi été SUPPRIMÉS dans le commit (code mort /
+pipeline en doublon jamais branché, pointant vers de mauvaises routes) et
+doivent être retirés manuellement de votre copie du projet pour que le
+nettoyage soit complet :
+
+lib/core/errors/failures.dart
+lib/features/flight_booking/data/datasources/flight_remote_data_source.dart
+lib/features/flight_booking/data/models/flight_model.dart
+lib/features/flight_booking/data/repositories/flight_repository_impl.dart
+lib/features/flight_booking/domain/entities/flight.dart
+lib/features/flight_booking/domain/repositories/flight_repository.dart
+lib/features/flight_booking/domain/usecases/search_flights_usecase.dart
+lib/features/flight_booking/presentation/bloc/flight_bloc.dart
+lib/features/flight_booking/presentation/bloc/flight_event.dart
+lib/features/flight_booking/presentation/bloc/flight_state.dart
+lib/injection_container.dart

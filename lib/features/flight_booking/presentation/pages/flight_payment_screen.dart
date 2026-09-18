@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import '../../data/models/payment_request.dart';
+import '../../../../core/di/injection.dart';
+import '../../../../core/models/payment_request.dart';
+import '../../../payment/presentation/pages/external_payment_screen.dart';
+import '../../data/datasources/flight_api_client.dart';
 import '../bloc/flight_booking_bloc.dart';
 import '../bloc/flight_booking_event.dart';
 import '../bloc/flight_booking_state.dart';
 import 'boarding_pass_screen.dart';
+import 'payment_pending_screen.dart';
 
 class FlightPaymentScreen extends StatefulWidget {
   final double flightPrice; // Montant reçu depuis l'écran précédent
@@ -24,67 +28,77 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
   String _selectedMomoOperator = 'ORANGE'; // 'ORANGE' ou 'MTN'
 
   final _formKey = GlobalKey<FormState>();
-  final _cardNumberController = TextEditingController();
-  final _cardHolderController = TextEditingController();
-  final _expiryController = TextEditingController();
-  final _cvvController = TextEditingController();
   final _phoneNumberController = TextEditingController();
 
   @override
   void dispose() {
-    _cardNumberController.dispose();
-    _cardHolderController.dispose();
-    _expiryController.dispose();
-    _cvvController.dispose();
     _phoneNumberController.dispose();
     super.dispose();
   }
 
-  // Calcul dynamique du montant à régler selon le choix
+  // Calcul dynamique du montant à régler selon le choix.
+  // Le montant de l'acompte "Réserver (Plus tard)" est calculé côté serveur
+  // (BookingResponse.reservationFee) : il dépend de l'offre, pas d'une constante.
   double get _currentAmountToPay {
     if (_selectedBillingOption == 1) {
-      return 5000.0; // Frais d'option / réservation fixe
+      final reservationFee =
+          context.read<FlightBookingBloc>().state.confirmedBooking?.reservationFee;
+      return reservationFee?.amount ?? widget.flightPrice;
     }
     return widget.flightPrice; // Montant total du vol reçu
   }
 
   void _submitPayment() {
     final blocState = context.read<FlightBookingBloc>().state;
-    final bookingId = blocState.bookingId ?? "BKG-${DateTime.now().millisecondsSinceEpoch}";
-
-    // Validation du numéro de téléphone si Mobile Money
-    if (_selectedPaymentMethod == 1) {
-      if (_phoneNumberController.text.trim().isEmpty || _phoneNumberController.text.trim().length < 9) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Veuillez entrer un numéro de téléphone valide'), backgroundColor: Colors.redAccent),
-        );
-        return;
-      }
-    } else {
-      // Validation du formulaire de carte si Carte bancaire
-      if (_formKey.currentState != null && !_formKey.currentState!.validate()) {
-        return;
-      }
+    final bookingId = blocState.bookingId;
+    if (bookingId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Réservation introuvable, veuillez réessayer.'), backgroundColor: Colors.redAccent),
+      );
+      return;
     }
 
-    String planString = _selectedBillingOption == 0 ? 'PAY_NOW' : 'PAY_LATER';
-    String methodString;
-
+    // Carte / Google Pay / Apple Pay / PayPal : le backend route ces méthodes
+    // vers une Checkout Session Stripe (voir StripePaymentGateway côté Java) -
+    // aucune donnée de carte ne transite par ce formulaire ni par ce backend.
+    // On renvoie simplement le payeur vers la page de paiement Next.js, qui
+    // sait déjà monter l'Embedded Checkout Stripe correctement.
     if (_selectedPaymentMethod == 0) {
-      methodString = 'CARD';
-    } else {
-      methodString = _selectedMomoOperator == 'ORANGE' ? 'ORANGE_MONEY' : 'MTN_MONEY';
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ExternalPaymentScreen(
+            bookingId: bookingId,
+            fetchBooking: (id) => sl<FlightApiClient>().getBooking(id, email: blocState.confirmedBooking?.contactEmail),
+            onConfirmed: () {
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (_) => const BoardingPassScreen()),
+                (route) => route.isFirst,
+              );
+            },
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Validation du numéro de téléphone Mobile Money — le backend exige
+    // exactement /^\+?\d{8,15}$/ une fois le préfixe pays ajouté (PaymentService).
+    final digitsOnly = _phoneNumberController.text.trim();
+    if (!RegExp(r'^\d{8,9}$').hasMatch(digitsOnly)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Veuillez entrer un numéro de téléphone valide'), backgroundColor: Colors.redAccent),
+      );
+      return;
     }
 
     final request = PaymentRequest(
       bookingId: bookingId,
-      paymentPlan: planString,
-      paymentMethod: methodString,
-      cardNumber: _selectedPaymentMethod == 0 ? _cardNumberController.text.replaceAll(' ', '') : null,
-      cardHolderName: _selectedPaymentMethod == 0 ? _cardHolderController.text.trim() : null,
-      expiry: _selectedPaymentMethod == 0 ? _expiryController.text.trim() : null,
-      cvv: _selectedPaymentMethod == 0 ? _cvvController.text.trim() : null,
-      mobileNumber: _selectedPaymentMethod == 1 ? _phoneNumberController.text.trim() : null,
+      paymentMethod: 'MOBILE_MONEY',
+      countryCode: 'CM',
+      countryCurrency: 'XAF',
+      mobileNumber: '+237${_phoneNumberController.text.trim()}',
     );
 
     context.read<FlightBookingBloc>().add(PaymentSubmitted(request));
@@ -96,14 +110,19 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
     final secondaryColor = Theme.of(context).colorScheme.secondary;
 
     return BlocConsumer<FlightBookingBloc, FlightBookingState>(
+      listenWhen: (previous, current) =>
+          previous.paymentStatus != current.paymentStatus || previous.errorMessage != current.errorMessage,
       listener: (context, state) {
-        if (state.isSubmitting) {
+        if (state.paymentStatus == PaymentStatus.success) {
           Navigator.pushAndRemoveUntil(
             context,
             MaterialPageRoute(builder: (context) => const BoardingPassScreen()),
                 (route) => route.isFirst,
           );
-        } else if (state.errorMessage != null) {
+        } else if (state.paymentStatus == PaymentStatus.pending ||
+            state.paymentStatus == PaymentStatus.pendingAuthorization) {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const PaymentPendingScreen()));
+        } else if (state.paymentStatus == PaymentStatus.failed && state.errorMessage != null) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(state.errorMessage!), backgroundColor: Colors.red.shade600),
           );
@@ -146,7 +165,7 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
                         _buildPaymentMethodSelector(primaryColor),
                         const SizedBox(height: 28),
                         if (_selectedPaymentMethod == 0) ...[
-                          _buildCreditCardForm(primaryColor),
+                          _buildStripeHandoffNotice(primaryColor),
                         ] else ...[
                           _buildMobileMoneyForm(primaryColor),
                         ],
@@ -205,7 +224,7 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: isSelected ? activeColor.withOpacity(0.05) : Colors.white,
+          color: isSelected ? activeColor.withValues(alpha: 0.05) : Colors.white,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: isSelected ? activeColor : Colors.grey.shade200,
@@ -249,7 +268,7 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10)],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10)],
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -278,105 +297,59 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
   }
 
   Widget _buildPaymentMethodSelector(Color activeColor) {
-    return Row(
-      children: [
-        Expanded(
-          child: _buildMethodTile(
-            index: 0,
-            label: 'Carte Crédit',
-            icon: Icons.credit_card_rounded,
-            activeColor: activeColor,
-          ),
+    return SegmentedButton<int>(
+      segments: const [
+        ButtonSegment(
+          value: 0,
+          label: Text('Carte / Wallet'),
+          icon: Icon(Icons.credit_card_rounded),
         ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: _buildMethodTile(
-            index: 1,
-            label: 'Mobile Money',
-            icon: Icons.phone_android_rounded,
-            activeColor: activeColor,
-          ),
+        ButtonSegment(
+          value: 1,
+          label: Text('Mobile Money'),
+          icon: Icon(Icons.phone_android_rounded),
         ),
       ],
-    );
-  }
-
-  Widget _buildMethodTile({required int index, required String label, required IconData icon, required Color activeColor}) {
-    final isSelected = _selectedPaymentMethod == index;
-    return InkWell(
-      onTap: () => setState(() => _selectedPaymentMethod = index),
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: isSelected ? activeColor : Colors.grey.shade200, width: isSelected ? 1.5 : 1),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, color: isSelected ? activeColor : Colors.grey.shade400, size: 28),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: isSelected ? activeColor : Colors.grey.shade600,
-                fontWeight: FontWeight.bold,
-                fontSize: 14,
-              ),
-            ),
-          ],
-        ),
+      selected: {_selectedPaymentMethod},
+      showSelectedIcon: false,
+      onSelectionChanged: (selection) => setState(() => _selectedPaymentMethod = selection.first),
+      style: SegmentedButton.styleFrom(
+        selectedBackgroundColor: activeColor.withValues(alpha: 0.1),
+        selectedForegroundColor: activeColor,
+        backgroundColor: Colors.white,
+        side: BorderSide(color: Colors.grey.shade200),
+        padding: const EdgeInsets.symmetric(vertical: 14),
       ),
     );
   }
 
-  Widget _buildCreditCardForm(Color primaryColor) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Informations de la carte',
-          style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700, fontSize: 14),
-        ),
-        const SizedBox(height: 12),
-        TextFormField(
-          controller: _cardNumberController,
-          keyboardType: TextInputType.number,
-          decoration: _buildInputDecoration('Numéro de carte', Icons.payment_rounded, primaryColor),
-          validator: (value) => (value == null || value.isEmpty) ? 'Champ requis' : null,
-        ),
-        const SizedBox(height: 16),
-        TextFormField(
-          controller: _cardHolderController,
-          keyboardType: TextInputType.name,
-          decoration: _buildInputDecoration('Nom du titulaire', Icons.person_outline_rounded, primaryColor),
-          validator: (value) => (value == null || value.isEmpty) ? 'Champ requis' : null,
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
-                controller: _expiryController,
-                keyboardType: TextInputType.number,
-                decoration: _buildInputDecoration('MM/AA', Icons.calendar_today_rounded, primaryColor),
-                validator: (value) => (value == null || value.isEmpty) ? 'Requis' : null,
-              ),
+  /// Carte/Google Pay/Apple Pay/PayPal ne collectent rien ici : ces méthodes
+  /// sont routées vers Stripe côté backend, qui affiche son propre formulaire
+  /// (voir ExternalPaymentScreen). Même message de confiance que côté Next.js
+  /// (PaymentForm) - "tu saisiras tes informations de paiement à l'étape
+  /// suivante, directement chez notre partenaire Stripe".
+  Widget _buildStripeHandoffNotice(Color primaryColor) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: primaryColor.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: primaryColor.withValues(alpha: 0.15), style: BorderStyle.solid),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.shield_outlined, color: primaryColor, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              "Tu saisiras tes informations de paiement à l'étape suivante, directement et en "
+              "toute sécurité chez notre partenaire de paiement Stripe.",
+              style: TextStyle(color: Colors.grey.shade700, fontSize: 13, height: 1.4),
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: TextFormField(
-                controller: _cvvController,
-                keyboardType: TextInputType.number,
-                obscureText: true,
-                decoration: _buildInputDecoration('CVV', Icons.lock_outline_rounded, primaryColor),
-                validator: (value) => (value == null || value.isEmpty) ? 'Requis' : null,
-              ),
-            ),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -467,7 +440,7 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
             color: isSelected ? color : Colors.grey.shade200,
             width: 1.5,
           ),
-          boxShadow: isSelected ? [BoxShadow(color: color.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 4))] : [],
+          boxShadow: isSelected ? [BoxShadow(color: color.withValues(alpha: 0.2), blurRadius: 8, offset: const Offset(0, 4))] : [],
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -506,7 +479,7 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
       padding: const EdgeInsets.only(left: 24, right: 24, bottom: 36, top: 16),
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, -4))],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, -4))],
       ),
       child: SizedBox(
         width: double.infinity,
@@ -521,9 +494,11 @@ class _FlightPaymentScreenState extends State<FlightPaymentScreen> {
           child: isSubmitting
               ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
               : Text(
-            isPayLater
-                ? 'Régler les frais d\'option (5 000 XAF)'
-                : 'Payer ${_currentAmountToPay.toStringAsFixed(0)} XAF',
+            _selectedPaymentMethod == 0
+                ? 'Continuer vers le paiement sécurisé'
+                : isPayLater
+                    ? 'Régler les frais d\'option (5 000 XAF)'
+                    : 'Payer ${_currentAmountToPay.toStringAsFixed(0)} XAF',
             style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
           ),
         ),

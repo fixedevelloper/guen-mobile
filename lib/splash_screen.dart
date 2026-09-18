@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
-
+import 'core/di/injection.dart';
+import 'features/auth/presentation/cubit/auth_cubit.dart';
+import 'l10n/generated/app_localizations.dart';
 import 'main.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -17,12 +19,16 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   void _navigateToHome() async {
-    // Petit délai de 2 secondes pour l'effet visuel de la marque
-    await Future.delayed(const Duration(seconds: 2));
+    // Résout la session persistée (cookie JWT) en parallèle du délai
+    // d'affichage du splash, pour que l'onglet Profil soit déjà à jour
+    // au premier build de MainScreen.
+    await Future.wait([
+      sl<AuthCubit>().checkSession(),
+      Future.delayed(const Duration(seconds: 2)),
+    ]);
 
     if (!mounted) return;
 
-    // Transition fluide vers l'écran principal en remplaçant la route
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (context) => const MainScreen()),
@@ -42,28 +48,29 @@ class _SplashScreenState extends State<SplashScreen> {
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: primaryColor.withOpacity(0.1),
+                color: primaryColor.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
-              child: Icon(
-                Icons.flight_takeoff_rounded,
-                size: 80,
-                color: primaryColor,
+              child: Image.asset(
+                'assets/images/logo.png',
+                width: 80,
+                height: 80,
+                fit: BoxFit.contain,
               ),
             ),
             const SizedBox(height: 24),
-            const Text(
-              'Guentravel',
+            Text(
+              'Guens travel & tours',
               style: TextStyle(
                 fontSize: 32,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF15A4E6),
+                color: primaryColor,
                 letterSpacing: 1.5,
               ),
             ),
             const SizedBox(height: 8),
             Text(
-              'Votre passerelle de voyage locale & internationale',
+              AppLocalizations.of(context)!.splashTagline,
               style: TextStyle(
                 fontSize: 14,
                 color: Colors.grey.shade500,

@@ -4,6 +4,8 @@ import '../bloc/flight_booking_bloc.dart';
 import '../bloc/flight_booking_event.dart';
 import '../bloc/flight_booking_state.dart';
 import 'flight_payment_screen.dart';
+import '../../../../core/di/injection.dart';
+import '../../../auth/presentation/cubit/auth_cubit.dart';
 
 // Modèle local pour gérer les contrôleurs de chaque passager
 class PassengerFormState {
@@ -11,7 +13,13 @@ class PassengerFormState {
   final TextEditingController nameController = TextEditingController();
   final TextEditingController passportController = TextEditingController();
   final TextEditingController dobController = TextEditingController();
+  // Nationalité : obligatoire côté backend pour toute réservation de vol
+  // (BookingService.validateFlightTravelers rejette la réservation sinon).
+  final TextEditingController nationalityController = TextEditingController(text: 'CM');
+  final TextEditingController passportIssueCountryController = TextEditingController();
+  final TextEditingController passportExpiryController = TextEditingController();
   DateTime? selectedRawDate;
+  DateTime? selectedPassportExpiryDate;
 
   PassengerFormState({required this.type});
 
@@ -19,6 +27,9 @@ class PassengerFormState {
     nameController.dispose();
     passportController.dispose();
     dobController.dispose();
+    nationalityController.dispose();
+    passportIssueCountryController.dispose();
+    passportExpiryController.dispose();
   }
 }
 
@@ -45,11 +56,25 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
     // Récupération des types de passagers depuis l'état du BLoC (Défini lors de la recherche)
     final currentState = context.read<FlightBookingBloc>().state;
 
-    final List<String> passengerTypes = currentState.passengerTypes ?? ['ADULT'];
+    final List<String> passengerTypes = currentState.passengerTypes;
 
     // Initialiser un formulaire pour chaque passager
     for (var type in passengerTypes) {
       _passengerForms.add(PassengerFormState(type: type));
+    }
+
+    // Pré-remplissage depuis le compte connecté (email de contact + nom du
+    // premier passager, celui-ci étant conventionnellement le responsable de
+    // la réservation) - même logique que le frontend Next.js, qui pré-remplit
+    // le formulaire de checkout depuis la session utilisateur. ProfileUser ne
+    // porte pas de téléphone (voir AuthResponse côté Java), donc rien à
+    // préremplir pour ce champ.
+    final authState = sl<AuthCubit>().state;
+    if (authState.isAuthenticated && authState.user != null) {
+      _contactEmailController.text = authState.user!.email;
+      if (_passengerForms.isNotEmpty) {
+        _passengerForms.first.nameController.text = authState.user!.fullName;
+      }
     }
   }
 
@@ -68,7 +93,24 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
     final primaryColor = Theme.of(context).colorScheme.primary;
     final secondaryColor = Theme.of(context).colorScheme.secondary;
 
-    return Scaffold(
+    return BlocListener<FlightBookingBloc, FlightBookingState>(
+      listenWhen: (previous, current) => previous.status != current.status,
+      listener: (context, state) {
+        if (state.status == FlightBookingStatus.paymentReady && state.confirmedBooking != null) {
+          final amount = state.confirmedBooking!.amountDue ?? state.confirmedBooking!.price;
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => FlightPaymentScreen(flightPrice: amount?.amount ?? 0),
+            ),
+          );
+        } else if (state.status == FlightBookingStatus.failure) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(state.errorMessage ?? 'Une erreur est survenue.'), backgroundColor: Colors.red.shade600),
+          );
+        }
+      },
+      child: Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
         title: const Text('Infos Personnelles', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
@@ -82,7 +124,8 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
       ),
       body: BlocBuilder<FlightBookingBloc, FlightBookingState>(
         builder: (context, state) {
-          final seatPicked = state.selectedSeats.isNotEmpty ? state.selectedSeats.join(', ') : 'Aucun';
+          final seatCodes = state.selectedSeatCodesByTraveler;
+          final seatPicked = seatCodes.isNotEmpty ? seatCodes.join(', ') : 'Aucun';
 
           return Column(
             children: [
@@ -101,7 +144,7 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
                             children: [
                               CircleAvatar(
                                 radius: 45,
-                                backgroundColor: primaryColor.withOpacity(0.1),
+                                backgroundColor: primaryColor.withValues(alpha: 0.1),
                                 child: Icon(Icons.person_rounded, size: 45, color: primaryColor),
                               ),
                               Container(
@@ -140,7 +183,7 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                           margin: const EdgeInsets.only(bottom: 24),
                           decoration: BoxDecoration(
-                            color: primaryColor.withOpacity(0.08),
+                            color: primaryColor.withValues(alpha: 0.08),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Row(
@@ -211,6 +254,52 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
                                     }
                                   },
                                 ),
+                                const SizedBox(height: 16),
+                                _buildInputField(
+                                  controller: passengerData.nationalityController,
+                                  label: 'Nationalité (code pays, ex: CM)',
+                                  icon: Icons.flag_outlined,
+                                  primaryColor: primaryColor,
+                                  textCapitalization: TextCapitalization.characters,
+                                  maxLength: 2,
+                                  validator: (value) => (value == null || !RegExp(r'^[A-Za-z]{2}$').hasMatch(value.trim()))
+                                      ? 'Code pays ISO2 requis (ex: CM)'
+                                      : null,
+                                ),
+                                const SizedBox(height: 16),
+                                _buildInputField(
+                                  controller: passengerData.passportIssueCountryController,
+                                  label: 'Pays d\'émission du passeport (optionnel)',
+                                  icon: Icons.flag_outlined,
+                                  primaryColor: primaryColor,
+                                  textCapitalization: TextCapitalization.characters,
+                                  maxLength: 2,
+                                  validator: (value) => (value != null && value.trim().isNotEmpty && !RegExp(r'^[A-Za-z]{2}$').hasMatch(value.trim()))
+                                      ? 'Code pays ISO2 (ex: CM)'
+                                      : null,
+                                ),
+                                const SizedBox(height: 16),
+                                _buildInputField(
+                                  controller: passengerData.passportExpiryController,
+                                  label: 'Expiration du passeport (optionnel)',
+                                  icon: Icons.calendar_today_rounded,
+                                  primaryColor: primaryColor,
+                                  readOnly: true,
+                                  onTap: () async {
+                                    DateTime? pickedDate = await showDatePicker(
+                                      context: context,
+                                      initialDate: DateTime.now().add(const Duration(days: 365)),
+                                      firstDate: DateTime.now(),
+                                      lastDate: DateTime.now().add(const Duration(days: 365 * 15)),
+                                    );
+                                    if (pickedDate != null) {
+                                      setState(() {
+                                        passengerData.selectedPassportExpiryDate = pickedDate;
+                                        passengerData.passportExpiryController.text = "${pickedDate.day.toString().padLeft(2, '0')}/${pickedDate.month.toString().padLeft(2, '0')}/${pickedDate.year}";
+                                      });
+                                    }
+                                  },
+                                ),
                               ],
                             ),
                           );
@@ -222,10 +311,11 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
               ),
 
               // Zone d'action de sauvegarde
-              _buildBottomActionSection(secondaryColor),
+              _buildBottomActionSection(secondaryColor, state.status == FlightBookingStatus.loading),
             ],
           );
         },
+      ),
       ),
     );
   }
@@ -245,17 +335,22 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
     bool readOnly = false,
     VoidCallback? onTap,
     String? Function(String?)? validator,
+    TextCapitalization textCapitalization = TextCapitalization.none,
+    int? maxLength,
   }) {
     return TextFormField(
       controller: controller,
       readOnly: readOnly,
       onTap: onTap,
       validator: validator,
+      textCapitalization: textCapitalization,
+      maxLength: maxLength,
       style: const TextStyle(fontSize: 15),
       decoration: InputDecoration(
         labelText: label,
         labelStyle: TextStyle(color: Colors.grey.shade500, fontSize: 13),
         prefixIcon: Icon(icon, color: Colors.grey.shade400, size: 20),
+        counterText: maxLength != null ? '' : null,
         filled: true,
         fillColor: Colors.white,
         errorStyle: const TextStyle(height: 0.8),
@@ -280,18 +375,18 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
     );
   }
 
-  Widget _buildBottomActionSection(Color actionColor) {
+  Widget _buildBottomActionSection(Color actionColor, bool isLoading) {
     return Container(
       padding: const EdgeInsets.only(left: 24, right: 24, bottom: 32, top: 16),
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10, offset: const Offset(0, -4))],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, -4))],
       ),
       child: SizedBox(
         width: double.infinity,
         height: 52,
         child: ElevatedButton(
-          onPressed: () {
+          onPressed: isLoading ? null : () {
             // Vérifier que le formulaire est valide ET que toutes les dates de naissance sont remplies
             bool allDatesSelected = _passengerForms.every((p) => p.selectedRawDate != null);
 
@@ -302,45 +397,39 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
                 int index = entry.key;
                 PassengerFormState p = entry.value;
 
-                // Récupérer le siège correspondant à l'index de ce passager
+                // Extras (sièges/bagages/repas/assurance) choisis pour CE passager -
+                // répartis par paxRef ("T1".."Tn"), même logique que
+                // applySelectedExtras côté Next.js. Remplace l'ancien seatNumber
+                // positionnel.
                 final state = context.read<FlightBookingBloc>().state;
-
-                // Si l'index est couvert, on prend le siège, sinon null (attendu par Java)
-                String? seat = (index < state.selectedSeats.length)
-                    ? state.selectedSeats[index]
-                    : null;
+                final ancillaryIds = state.ancillaryIdsForTraveler(index);
 
                 return TravelerInfo(
                   fullName: p.nameController.text.trim(),
                   dateOfBirth: p.selectedRawDate!, // Passe l'objet DateTime direct
                   passportNumber: p.passportController.text.trim().toUpperCase(),
                   type: p.type, // 'ADULT', etc.
-                  seatNumber: seat,
+                  // Requis par le backend pour toute réservation de vol
+                  // (BookingService.validateFlightTravelers).
+                  nationality: p.nationalityController.text.trim().toUpperCase(),
+                  passportIssueCountry: p.passportIssueCountryController.text.trim().isEmpty
+                      ? null
+                      : p.passportIssueCountryController.text.trim().toUpperCase(),
+                  passportExpiryDate: p.selectedPassportExpiryDate,
+                  selectedAncillaryIds: ancillaryIds.isEmpty ? null : ancillaryIds,
                 );
               }).toList();
 
-              // 2. Envoi de l'événement au Bloc
+              // Envoi de l'événement au Bloc ; la navigation vers l'écran de
+              // paiement se fait dans le BlocListener une fois le checkout
+              // terminé (state.status == paymentReady), pas ici — le checkout
+              // est asynchrone et n'a pas encore de bookingId à cet instant.
               context.read<FlightBookingBloc>().add(PassengerInfoSubmitted(
                 contactEmail: _contactEmailController.text.trim(),
                 contactFullName: _passengerForms.first.nameController.text.trim(),
                 contactPhone: _contactPhoneController.text.trim(),
-                travelers: travelersList, // Utilisation de la nouvelle liste typée
+                travelers: travelersList,
               ));
-
-              // Dans votre UI (lors du déclenchement de la navigation vers FlightPaymentScreen)
-              final flight = context.read<FlightBookingBloc>().state.selectedFlight;
-
-              if (flight != null) {
-                // Récupération directe du prix réel depuis l'objet du vol sélectionné
-                final double realPrice = flight.quotes.first.price.amount;
-
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => FlightPaymentScreen(flightPrice: realPrice),
-                  ),
-                );
-              }
             } else if (!allDatesSelected) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text("Veuillez sélectionner la date de naissance pour tous les passagers")),
@@ -352,7 +441,9 @@ class _PassengerInfoScreenState extends State<PassengerInfoScreen> {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             elevation: 0,
           ),
-          child: const Text(
+          child: isLoading
+              ? const SizedBox(height: 22, width: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+              : const Text(
             'Confirmer et Continuer',
             style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
           ),

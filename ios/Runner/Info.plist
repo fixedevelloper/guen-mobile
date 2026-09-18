@@ -26,6 +26,15 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Autorise le HTTP en clair vers localhost / le réseau local uniquement,
+		     nécessaire pour joindre le backend com.guentours en développement
+		     (simulateur iOS -> localhost:8080). Les domaines internet restent
+		     soumis à ATS ; le backend de production doit rester en HTTPS. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

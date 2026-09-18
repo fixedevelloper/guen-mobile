@@ -1,13 +1,19 @@
 import 'package:dio/dio.dart';
+import '../models/ancillary_option.dart';
 import '../models/flight_search_request_dto.dart';
 import '../models/harmonized_flight_offer.dart';
 import '../models/multi_city_itinerary.dart';
-import '../models/seat_map_response.dart';
-import '../models/payment_request.dart'; // N'oubliez pas cet import
+import '../../../../core/errors/failures.dart';
+import '../../../../core/models/payment_request.dart';
+import '../../../../core/models/payment_result.dart';
+import '../../../../core/models/booking_response.dart';
 
+/// Client HTTP pour les endpoints publics `/api/search/**`, `/api/bookings/**`
+/// et `/api/payments` du backend Spring Boot. L'URL de base (host + `/api`)
+/// est portée par le [Dio] injecté (voir [DioClient] / [ApiConfig]) : ce
+/// client n'utilise que des chemins relatifs.
 class FlightApiClient {
   final Dio _dio;
-  final String _baseUrl = 'http://127.0.0.1:8080/api/'; // Assurez-vous que c'est accessible depuis votre émulateur (ex: 10.0.2.2 pour Android)
 
   FlightApiClient(this._dio);
 
@@ -15,7 +21,7 @@ class FlightApiClient {
     try {
       // Envoi sous forme de queryParameters pour correspondre à @ModelAttribute
       final response = await _dio.get(
-        '${_baseUrl}search/flights',
+        '/search/flights',
         queryParameters: request.toJson(),
       );
 
@@ -26,7 +32,7 @@ class FlightApiClient {
         throw Exception('Erreur serveur lors de la recherche');
       }
     } on DioException catch (e) {
-      throw Exception('Erreur réseau : ${e.message}');
+      throw ApiException.fromDioException(e);
     }
   }
 
@@ -36,7 +42,7 @@ class FlightApiClient {
       ) async {
     try {
       final response = await _dio.post(
-        '${_baseUrl}search/flights/multi-city',
+        '/search/flights/multi-city',
         data: requestDto.toJson(),
       );
 
@@ -47,88 +53,116 @@ class FlightApiClient {
       } else {
         throw Exception("Erreur lors de la récupération des offres multi-destinations");
       }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  // Exemple d'implémentation dans ton FlightApiClient
-  Future<SeatMapResponse> getFlightSeatMap(String offerId) async {
-    try {
-      final response = await _dio.get(
-        '${_baseUrl}search/flights/seats',
-        queryParameters: {'offerId': offerId},
-      );
-
-      if (response.statusCode == 200 && response.data != null) {
-        return SeatMapResponse.fromJson(response.data as Map<String, dynamic>);
-      } else {
-        throw Exception('Failed to load seat map');
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
-  /// Envoie la requête de réservation (incluant les passagers et les sièges sélectionnés)
-  /// au contrôleur Spring Boot : @PostMapping("/checkout")
-  Future<Map<String, dynamic>> submitCheckout(Map<String, dynamic> checkoutData) async {
-    try {
-      final response = await _dio.post(
-        '${_baseUrl}bookings/checkout',
-        data: checkoutData,
-        options: Options(
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        ),
-      );
-
-      if (response.statusCode == 201) {
-        // Retourne le BookingResponse converti en Map
-        // Tu pourras facilement le parser en objet BookingResponse plus tard
-        return response.data as Map<String, dynamic>;
-      } else {
-        throw Exception('Erreur lors de la finalisation de la réservation : ${response.statusMessage}');
-      }
     } on DioException catch (e) {
-      // Gestion des erreurs Spring Boot (Validation, etc.)
-      if (e.response?.data != null) {
-        throw Exception('Erreur serveur : ${e.response?.data['message'] ?? e.message}');
-      }
-      throw Exception('Erreur réseau : ${e.message}');
+      throw ApiException.fromDioException(e);
     }
   }
 
-  /// Traite le paiement via le contrôleur Spring Boot
-  /// Attend un statut 200 (HttpStatus.OK) en cas de succès, ou 402 (PAYMENT_REQUIRED) en cas d'échec
-  Future<Map<String, dynamic>> submitPayment(PaymentRequest request) async {
+  /// Cote les extras tarifés (bagages/repas/sièges/assurance) disponibles pour une
+  /// offre, avant la soumission finale du checkout : @PostMapping("/bookings/ancillary-options").
+  /// `travelers` n'a besoin que de nom/type (voir AncillaryOptionsRequest côté Java) - les
+  /// vrais noms ne sont pas encore connus à cette étape.
+  Future<List<AncillaryOption>> getAncillaryOptions(
+    String offerId,
+    String offerType,
+    List<Map<String, String>> travelers,
+  ) async {
     try {
       final response = await _dio.post(
-        '${_baseUrl}payments', // <-- Ajuste le chemin selon le @RequestMapping de ton contrôleur Java
-        data: request.toJson(),
-        options: Options(
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        ),
+        '/bookings/ancillary-options',
+        data: {
+          'offerId': offerId,
+          'offerType': offerType,
+          'travelers': travelers,
+        },
       );
 
       if (response.statusCode == 200) {
-        return response.data as Map<String, dynamic>; // PaymentResponse
+        final List<dynamic> data = response.data;
+        return data.map((json) => AncillaryOption.fromJson(json)).toList();
       } else {
-        throw Exception('Erreur inattendue : ${response.statusMessage}');
+        throw Exception('Erreur lors de la récupération des options additionnelles');
       }
     } on DioException catch (e) {
-      // Ton backend Java renvoie HttpStatus.PAYMENT_REQUIRED (402) si le paiement échoue (PaymentStatus != SUCCEEDED)
-      if (e.response?.statusCode == 402) {
-        throw Exception('Le paiement a été refusé.');
-      }
+      throw ApiException.fromDioException(e);
+    }
+  }
 
-      if (e.response?.data != null) {
-        throw Exception('Erreur serveur : ${e.response?.data['message'] ?? e.message}');
-      }
-      throw Exception('Erreur réseau : ${e.message}');
+  /// Relit une réservation par id : @GetMapping("/{id}"). `email` n'est requis
+  /// que pour un accès invité (doit correspondre au contact de la réservation) -
+  /// inutile pour le compte authentifié qui l'a créée. Utilisé pour sonder le
+  /// statut de la réservation pendant le paiement externe (voir
+  /// ExternalPaymentScreen) : le paiement carte/wallet se termine sur la page
+  /// web Stripe, pas dans l'app, donc rien d'autre ne signale la confirmation
+  /// côté client.
+  Future<BookingResponse> getBooking(String bookingId, {String? email}) async {
+    try {
+      final response = await _dio.get(
+        '/bookings/$bookingId',
+        queryParameters: email != null ? {'email': email} : null,
+      );
+      return BookingResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  /// Envoie la requête de réservation (vol simple) au contrôleur Spring Boot :
+  /// @PostMapping("/checkout"), renvoie 201 + le BookingResponse créé.
+  Future<BookingResponse> submitCheckout(Map<String, dynamic> checkoutData) async {
+    try {
+      final response = await _dio.post('/bookings/checkout', data: checkoutData);
+      return BookingResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  /// Enregistre un itinéraire MULTI_CITY (tous les segments, même fournisseur)
+  /// en une seule réservation : @PostMapping("/checkout/multi-city").
+  Future<BookingResponse> submitMultiCityCheckout(Map<String, dynamic> checkoutData) async {
+    try {
+      final response = await _dio.post('/bookings/checkout/multi-city', data: checkoutData);
+      return BookingResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  /// Traite le paiement via le contrôleur Spring Boot. Un paiement refusé
+  /// n'est pas une erreur HTTP : PaymentController répond toujours 200 avec
+  /// un PaymentResponse dont `status` vaut FAILED (voir PaymentResult.isSucceeded).
+  Future<PaymentResult> submitPayment(PaymentRequest request) async {
+    try {
+      final response = await _dio.post('/payments', data: request.toJson());
+      return PaymentResult.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  /// Relit l'état courant d'un paiement (polling pour Mobile Money en
+  /// attente de confirmation USSD). `email` doit correspondre au contact de
+  /// la réservation (accès invité, voir PaymentController.getById côté Spring).
+  Future<PaymentResult> getPaymentStatus(String paymentId, String email) async {
+    try {
+      final response = await _dio.get('/payments/$paymentId', queryParameters: {'email': email});
+      return PaymentResult.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  /// Soumet le code (PIN/AVS/OTP) demandé par la gateway pour débloquer un
+  /// paiement carte resté en PENDING_AUTHORIZATION (voir
+  /// PaymentController.completeCardAuthorization côté Spring : aucun webhook
+  /// ne résout cette étape seule, elle exige ce round-trip explicite).
+  Future<PaymentResult> submitCardAuthorization(String paymentId, String code) async {
+    try {
+      final response = await _dio.post('/payments/$paymentId/card-authorization', data: {'pin': code});
+      return PaymentResult.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
     }
   }
 }
